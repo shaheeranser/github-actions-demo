@@ -1,0 +1,237 @@
+name: Production Deployment - Final Release
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:  # Allow manual deployment
+
+env:
+  NAMESPACE: production
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+jobs:
+  # Job 1: Deploy Backend Services and Capture IPs
+  deploy-backend:
+    runs-on: ubuntu-latest
+    # Removed: environment: production
+    
+    outputs:
+      customer_service_ip: ${{ steps.get_customer_ip.outputs.external_ip }}
+      product_service_ip: ${{ steps.get_product_ip.outputs.external_ip }}
+      order_service_ip: ${{ steps.get_order_ip.outputs.external_ip }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          enable-AzPSSession: true
+
+      - name: Set Kubernetes context
+        run: |
+          az aks get-credentials --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --name ${{ secrets.AKS_CLUSTER_NAME }} --overwrite-existing
+
+      - name: Attach ACR to AKS
+        run: |
+          az aks update --name ${{ secrets.AKS_CLUSTER_NAME }} --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --attach-acr ${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Create production namespace if not exists
+        run: |
+          kubectl create namespace ${{ env.NAMESPACE }} --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy backend infrastructure
+        run: |
+          echo "Deploying backend infrastructure to production..."
+          kubectl apply -f k8s/configmaps.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/secrets.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/customer-db.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/order-db.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/product-db.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/rabbitmq.yaml -n ${{ env.NAMESPACE }}
+
+      - name: Wait for databases to be ready
+        run: |
+          echo "Waiting for databases to be ready..."
+          kubectl wait --for=condition=ready pod -l app=customer-db -n ${{ env.NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=order-db -n ${{ env.NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=product-db -n ${{ env.NAMESPACE }} --timeout=300s
+
+      - name: Deploy backend services
+        run: |
+          echo "Deploying backend microservices..."
+          kubectl apply -f k8s/customer-service.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/order-service.yaml -n ${{ env.NAMESPACE }}
+          kubectl apply -f k8s/product-service.yaml -n ${{ env.NAMESPACE }}
+
+      - name: Wait for backend LoadBalancer IPs
+        run: |
+          echo "Waiting for backend LoadBalancer IPs to be assigned (up to 5 minutes)..."
+          CUSTOMER_IP=""
+          PRODUCT_IP=""
+          ORDER_IP=""
+          
+          for i in $(seq 1 60); do
+            echo "Attempt $i/60 to get IPs..."
+            CUSTOMER_IP=$(kubectl get service customer-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "")
+            PRODUCT_IP=$(kubectl get service product-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "")
+            ORDER_IP=$(kubectl get service order-service -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "")
+
+            if [[ -n "$CUSTOMER_IP" && -n "$PRODUCT_IP" && -n "$ORDER_IP" ]]; then
+              echo "All backend LoadBalancer IPs assigned!"
+              echo "Customer Service IP: $CUSTOMER_IP"
+              echo "Product Service IP: $PRODUCT_IP"
+              echo "Order Service IP: $ORDER_IP"
+              break
+            fi
+            sleep 5
+          done
+          
+          if [[ -z "$CUSTOMER_IP" || -z "$PRODUCT_IP" || -z "$ORDER_IP" ]]; then
+            echo "Warning: One or more LoadBalancer IPs not assigned after timeout."
+            echo "Using service names for internal communication instead."
+            CUSTOMER_IP="customer-service"
+            PRODUCT_IP="product-service"
+            ORDER_IP="order-service"
+          fi
+          
+          echo "CUSTOMER_IP=$CUSTOMER_IP" >> $GITHUB_ENV
+          echo "PRODUCT_IP=$PRODUCT_IP" >> $GITHUB_ENV
+          echo "ORDER_IP=$ORDER_IP" >> $GITHUB_ENV
+
+      - name: Capture Customer Service IP for output
+        id: get_customer_ip
+        run: echo "external_ip=${{ env.CUSTOMER_IP }}" >> $GITHUB_OUTPUT
+      
+      - name: Capture Product Service IP for output
+        id: get_product_ip
+        run: echo "external_ip=${{ env.PRODUCT_IP }}" >> $GITHUB_OUTPUT
+      
+      - name: Capture Order Service IP for output
+        id: get_order_ip
+        run: echo "external_ip=${{ env.ORDER_IP }}" >> $GITHUB_OUTPUT
+
+      - name: Logout from Azure
+        run: az logout
+
+  # Job 2: Build and Deploy Frontend with Injected IPs
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+    # Removed: environment: production
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
+
+      - name: Inject Backend IPs into Frontend configuration
+        run: |
+          echo "Injecting backend service IPs into frontend configuration..."
+          echo "Customer Service: ${{ needs.deploy-backend.outputs.customer_service_ip }}"
+          echo "Product Service: ${{ needs.deploy-backend.outputs.product_service_ip }}"
+          echo "Order Service: ${{ needs.deploy-backend.outputs.order_service_ip }}"
+          
+          # Create a temporary main.js with injected IPs
+          cp frontend/main.js frontend/main.js.backup
+          
+          # Replace placeholder URLs with actual IPs
+          sed -i "s|http://customer-service:8002|http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002|g" frontend/main.js
+          sed -i "s|http://product-service:8000|http://${{ needs.deploy-backend.outputs.product_service_ip }}:8000|g" frontend/main.js
+          sed -i "s|http://order-service:8001|http://${{ needs.deploy-backend.outputs.order_service_ip }}:8001|g" frontend/main.js
+          
+          # Also handle the case where placeholders might be used
+          sed -i "s|_CUSTOMER_API_URL_|http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002|g" frontend/main.js
+          sed -i "s|_PRODUCT_API_URL_|http://${{ needs.deploy-backend.outputs.product_service_ip }}:8000|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|http://${{ needs.deploy-backend.outputs.order_service_ip }}:8001|g" frontend/main.js
+          
+          echo "--- Modified main.js content ---"
+          grep -E "(customer-service|product-service|order-service|_API_URL_)" frontend/main.js || echo "No API URLs found in main.js"
+          echo "---------------------------------"
+
+      - name: Build Frontend Image with injected IPs
+        run: |
+          echo "Building frontend image with configured backend URLs..."
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:latest ./frontend/
+
+      - name: Push Frontend Image to ACR
+        run: |
+          docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
+
+      - name: Set Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Deploy Frontend to Production
+        run: |
+          echo "Deploying frontend to production namespace..."
+          kubectl apply -f k8s/frontend.yaml -n ${{ env.NAMESPACE }}
+
+      - name: Wait for frontend to be ready
+        run: |
+          echo "Waiting for frontend to be ready..."
+          kubectl wait --for=condition=ready pod -l app=frontend -n ${{ env.NAMESPACE }} --timeout=300s
+
+      - name: Get production frontend URL
+        run: |
+          echo "Production Deployment Complete!"
+          echo "==============================="
+          FRONTEND_IP=$(kubectl get service frontend -n ${{ env.NAMESPACE }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "Pending")
+          echo "Frontend URL: http://$FRONTEND_IP"
+          echo "Backend Services:"
+          echo " - Customer: http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002"
+          echo " - Product: http://${{ needs.deploy-backend.outputs.product_service_ip }}:8000"
+          echo " - Order: http://${{ needs.deploy-backend.outputs.order_service_ip }}:8001"
+
+      - name: Restore original main.js
+        run: |
+          mv frontend/main.js.backup frontend/main.js
+          echo "Original main.js restored"
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
+
+  # Job 3: Production Health Check
+  production-health-check:
+    runs-on: ubuntu-latest
+    needs: [deploy-backend, deploy-frontend]
+    # Removed: environment: production
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Run production health checks
+        run: |
+          echo "Running production health checks..."
+          kubectl get pods -n ${{ env.NAMESPACE }}
+          kubectl get services -n ${{ env.NAMESPACE }}
+          
+          # Simple health check via port-forward
+          kubectl port-forward -n ${{ env.NAMESPACE }} service/frontend 8080:80 &
+          sleep 5
+          curl -f http://localhost:8080/ && echo "Frontend is healthy" || echo "Frontend health check failed"
+          pkill -f "kubectl port-forward"
+
+      - name: Logout from Azure
+        run: az logout
