@@ -15,8 +15,7 @@ jobs:
   deploy-and-test-staging:
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    # Removed: environment: staging
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -36,89 +35,68 @@ jobs:
         run: |
           echo "Creating temporary staging namespace: ${{ env.STAGING_NAMESPACE }}"
           kubectl create namespace ${{ env.STAGING_NAMESPACE }}
-          echo "Staging namespace created successfully"
+          echo "✅ Staging namespace created successfully"
 
       - name: Deploy entire application to staging
         run: |
           echo "Deploying complete application stack to staging..."
           kubectl apply -f k8s/ -n ${{ env.STAGING_NAMESPACE }}
-          echo "Application deployed to staging"
+          echo "✅ Application deployed to staging"
 
       - name: Wait for all pods to be ready
         run: |
-          echo "Waiting for all pods to be ready (timeout: 5 minutes)..."
-          
-          # Wait for databases first
-          kubectl wait --for=condition=ready pod -l app=customer-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=order-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=product-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=rabbitmq -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          
-          # Wait for backend services
-          kubectl wait --for=condition=ready pod -l app=customer-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=order-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl wait --for=condition=ready pod -l app=product-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          
-          # Wait for frontend
-          kubectl wait --for=condition=ready pod -l app=frontend -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          
-          echo "All pods are ready!"
+          echo "Waiting for all pods in namespace ${{ env.STAGING_NAMESPACE }}..."
+          kubectl wait --for=condition=ready pod -l app -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          echo "✅ All pods are ready!"
 
       - name: Run automated smoke tests
         run: |
           echo "Running automated smoke tests on staging environment..."
           
-          # Set up port forwarding for testing
-          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/frontend 8080:80 &
-          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/customer-service 8002:8002 &
-          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/product-service 8000:8000 &
-          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/order-service 8001:8001 &
-          
-          # Wait for port forwarding to establish
-          sleep 10
-          
-          echo "Testing service health endpoints..."
-          
-          # Test frontend health
-          if curl -f http://localhost:8080/; then
-            echo "✅ Frontend health check passed"
-          else
-            echo "❌ Frontend health check failed"
-            exit 1
-          fi
-          
-          # Test backend service health endpoints
-          for service in "customer-service:8002" "product-service:8000" "order-service:8001"; do
-            name=$(echo $service | cut -d: -f1)
-            port=$(echo $service | cut -d: -f2)
-            if curl -f http://localhost:$port/health; then
-              echo "✅ $name health check passed"
-            else
-              echo "❌ $name health check failed"
-              exit 1
-            fi
-          done
-          
-          # Test basic API functionality
-          echo "Testing basic API functionality..."
-          if curl -f http://localhost:8000/products/; then
-            echo "✅ Product API is accessible"
-          else
-            echo "❌ Product API test failed"
-            exit 1
-          fi
-          
-          # Kill port forwarding processes
-          pkill -f "kubectl port-forward"
-          
+          # Instead of port-forward, test directly inside cluster using kubectl exec
+          FRONTEND_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=frontend -o jsonpath='{.items[0].metadata.name}')
+          CUSTOMER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=customer-service -o jsonpath='{.items[0].metadata.name}')
+          PRODUCT_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=product-service -o jsonpath='{.items[0].metadata.name}')
+          ORDER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=order-service -o jsonpath='{.items[0].metadata.name}')
+
+          echo "Testing frontend..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $FRONTEND_POD -- curl -fs http://localhost:80/ || exit 1
+
+          echo "Testing customer-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $CUSTOMER_POD -- curl -fs http://localhost:8002/health || exit 1
+
+          echo "Testing product-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -fs http://localhost:8000/health || exit 1
+
+          echo "Testing order-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $ORDER_POD -- curl -fs http://localhost:8001/health || exit 1
+
+          echo "Testing product API..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -fs http://localhost:8000/products/ || exit 1
+
           echo "✅ All smoke tests passed!"
 
-      - name: Destroy temporary staging environment
+      - name: Collect pod logs on failure
+        if: failure()
         run: |
-          echo "Destroying temporary staging environment: ${{ env.STAGING_NAMESPACE }}"
+          echo "Collecting logs for debugging..."
+          kubectl logs -n ${{ env.STAGING_NAMESPACE }} --all-containers --selector=app > staging-logs.txt || true
+        continue-on-error: true
+
+      - name: Upload logs as artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-logs
+          path: staging-logs.txt
+
+      - name: Destroy temporary staging environment
+        if: always()
+        run: |
+          echo "Destroying temporary staging namespace: ${{ env.STAGING_NAMESPACE }}"
           kubectl delete namespace ${{ env.STAGING_NAMESPACE }} --ignore-not-found=true
           echo "✅ Staging environment destroyed successfully"
 
       - name: Logout from Azure
-        run: az logout
         if: always()
+        run: az logout
