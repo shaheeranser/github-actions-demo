@@ -2,14 +2,20 @@ name: CD - Deploy to AKS
 
 on:
   workflow_dispatch:
-  workflow_call:
     inputs:
       aks_cluster_name:
+        description: 'AKS cluster name'
         required: true
         type: string
       aks_resource_group:
+        description: 'AKS resource group'
         required: true
         type: string
+
+env:
+  ACR_FULL: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+  # trimmed registry name for AKS attach
+  ACR_NAME: ${{ secrets.AZURE_CONTAINER_REGISTRY }}  # will trim in script
 
 jobs:
   deploy-backend:
@@ -30,20 +36,30 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to Azure Container Registry
-        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+        run: az acr login --name ${{ env.ACR_FULL }}
+
+      - name: Trim ACR name for AKS
+        id: trim_acr
+        run: |
+          ACR_ONLY=$(echo "${{ env.ACR_FULL }}" | sed 's/\.azurecr\.io//')
+          echo "ACR_ONLY=$ACR_ONLY" >> $GITHUB_ENV
 
       - name: Set AKS context
         uses: azure/aks-set-context@v3
         with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-      - name: Attach ACR
-        run: |
-          az aks update --name ${{ secrets.AKS_CLUSTER_NAME }} --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+          resource-group: ${{ github.event.inputs.aks_resource_group }}
+          cluster-name: ${{ github.event.inputs.aks_cluster_name }}
 
-      - name: Deploy Backend Infrastructure (Namespace, ConfigMaps, Secrets, Databases)
+      - name: Attach ACR to AKS
         run: |
-          echo "Deploying backend infrastructure..."
+          echo "Attaching ACR $ACR_ONLY to AKS cluster..."
+          az aks update \
+            --name ${{ github.event.inputs.aks_cluster_name }} \
+            --resource-group ${{ github.event.inputs.aks_resource_group }} \
+            --attach-acr $ACR_ONLY
+
+      - name: Deploy backend infrastructure
+        run: |
           cd k8s/
           kubectl apply -f configmaps.yaml
           kubectl apply -f secrets.yaml
@@ -58,14 +74,29 @@ jobs:
           kubectl apply -f order-service.yaml
           kubectl apply -f customer-service.yaml
 
-      - name: Get backend service IPs
+      - name: Get backend LoadBalancer IPs
         id: get_ips
         run: |
-          echo "Waiting for LoadBalancer IPs..."
-          sleep 60
-          echo "product_ip=$(kubectl get svc product-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
-          echo "order_ip=$(kubectl get svc order-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
-          echo "customer_ip=$(kubectl get svc customer-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
+          echo "Waiting for LoadBalancer IPs (up to 180s)..."
+          for svc in product-service order-service customer-service; do
+            for i in {1..36}; do
+              IP=$(kubectl get svc $svc -o jsonpath='{.status.loadBalancer.ingress[0].ip}' || echo "")
+              if [ -n "$IP" ]; then
+                echo "$svc IP found: $IP"
+                break
+              fi
+              sleep 5
+            done
+            if [ -z "$IP" ]; then
+              echo "ERROR: $svc LoadBalancer IP not assigned"
+              exit 1
+            fi
+            case $svc in
+              product-service) echo "product_ip=$IP" >> $GITHUB_OUTPUT ;;
+              order-service) echo "order_ip=$IP" >> $GITHUB_OUTPUT ;;
+              customer-service) echo "customer_ip=$IP" >> $GITHUB_OUTPUT ;;
+            esac
+          done
 
   deploy-frontend:
     runs-on: ubuntu-latest
@@ -81,7 +112,7 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to Azure Container Registry
-        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+        run: az acr login --name ${{ env.ACR_FULL }}
 
       - name: Inject Backend IPs into Frontend main.js
         run: |
@@ -93,16 +124,16 @@ jobs:
 
       - name: Build and Push Frontend
         run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
+          docker build -t ${{ env.ACR_FULL }}/frontend:latest ./frontend/
+          docker push ${{ env.ACR_FULL }}/frontend:latest
 
       - name: Set AKS context
         uses: azure/aks-set-context@v3
         with:
-          resource-group: ${{ inputs.aks_resource_group }}
-          cluster-name: ${{ inputs.aks_cluster_name }}
+          resource-group: ${{ github.event.inputs.aks_resource_group }}
+          cluster-name: ${{ github.event.inputs.aks_cluster_name }}
 
-      - name: Dry-run Kubernetes manifests
+      - name: Dry-run frontend deployment
         run: |
           cd k8s/
           kubectl apply --dry-run=client -o yaml -f frontend.yaml
