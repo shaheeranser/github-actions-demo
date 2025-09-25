@@ -4,7 +4,6 @@ on:
   workflow_run:
     workflows: ["CI Pipeline"]
     types: [completed]
-    branches: [testing]
   workflow_dispatch:  # Allow manual triggers
 
 env:
