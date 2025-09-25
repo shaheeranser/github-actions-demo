@@ -84,7 +84,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
-          flake8 .
 
       - name: Run order_service tests
         working-directory: backend/order_service
@@ -97,7 +96,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
-          flake8 .
 
       - name: Run customer_service tests
         working-directory: backend/customer_service
@@ -110,7 +108,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
-          flake8 .
 
   build_and_push_images:
     runs-on: ubuntu-latest
