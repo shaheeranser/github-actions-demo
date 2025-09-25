@@ -1,0 +1,124 @@
+name: Staging Deployment - Temporary Environment
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [testing]
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  STAGING_NAMESPACE: staging-${{ github.run_id }}
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+jobs:
+  deploy-and-test-staging:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    # Removed: environment: staging
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Create temporary staging namespace
+        run: |
+          echo "Creating temporary staging namespace: ${{ env.STAGING_NAMESPACE }}"
+          kubectl create namespace ${{ env.STAGING_NAMESPACE }}
+          echo "Staging namespace created successfully"
+
+      - name: Deploy entire application to staging
+        run: |
+          echo "Deploying complete application stack to staging..."
+          kubectl apply -f k8s/ -n ${{ env.STAGING_NAMESPACE }}
+          echo "Application deployed to staging"
+
+      - name: Wait for all pods to be ready
+        run: |
+          echo "Waiting for all pods to be ready (timeout: 5 minutes)..."
+          
+          # Wait for databases first
+          kubectl wait --for=condition=ready pod -l app=customer-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=order-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=product-db -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=rabbitmq -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          
+          # Wait for backend services
+          kubectl wait --for=condition=ready pod -l app=customer-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=order-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl wait --for=condition=ready pod -l app=product-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          
+          # Wait for frontend
+          kubectl wait --for=condition=ready pod -l app=frontend -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          
+          echo "All pods are ready!"
+
+      - name: Run automated smoke tests
+        run: |
+          echo "Running automated smoke tests on staging environment..."
+          
+          # Set up port forwarding for testing
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/frontend 8080:80 &
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/customer-service 8002:8002 &
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/product-service 8000:8000 &
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} service/order-service 8001:8001 &
+          
+          # Wait for port forwarding to establish
+          sleep 10
+          
+          echo "Testing service health endpoints..."
+          
+          # Test frontend health
+          if curl -f http://localhost:8080/; then
+            echo "✅ Frontend health check passed"
+          else
+            echo "❌ Frontend health check failed"
+            exit 1
+          fi
+          
+          # Test backend service health endpoints
+          for service in "customer-service:8002" "product-service:8000" "order-service:8001"; do
+            name=$(echo $service | cut -d: -f1)
+            port=$(echo $service | cut -d: -f2)
+            if curl -f http://localhost:$port/health; then
+              echo "✅ $name health check passed"
+            else
+              echo "❌ $name health check failed"
+              exit 1
+            fi
+          done
+          
+          # Test basic API functionality
+          echo "Testing basic API functionality..."
+          if curl -f http://localhost:8000/products/; then
+            echo "✅ Product API is accessible"
+          else
+            echo "❌ Product API test failed"
+            exit 1
+          fi
+          
+          # Kill port forwarding processes
+          pkill -f "kubectl port-forward"
+          
+          echo "✅ All smoke tests passed!"
+
+      - name: Destroy temporary staging environment
+        run: |
+          echo "Destroying temporary staging environment: ${{ env.STAGING_NAMESPACE }}"
+          kubectl delete namespace ${{ env.STAGING_NAMESPACE }} --ignore-not-found=true
+          echo "✅ Staging environment destroyed successfully"
+
+      - name: Logout from Azure
+        run: az logout
+        if: always()
