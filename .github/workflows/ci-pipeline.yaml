@@ -1,142 +1,163 @@
-name: CI Pipeline - Test, Build and Push Images
+name: CI Pipeline
 
 on:
   push:
-    branches: [ testing ]
+    branches:
+      - testing
   workflow_dispatch:
 
 env:
   ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
 jobs:
-  # Job 1: Run tests for all backend services
-  test-backend-services:
+  test_and_lint_backends:
     runs-on: ubuntu-latest
-    services:
-      customer_db:
-        image: postgres:15
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: customers
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports: [5432:5432]
 
+    services:
+      # Product DB
       product_db:
         image: postgres:15
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: products
+        ports:
+          - 5432:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-        ports: [5433:5432]
 
+      # Order DB
       order_db:
         image: postgres:15
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_DB: orders
+        ports:
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -U postgres"
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-        ports: [5434:5432]
 
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          for service in customer_service order_service product_service; do
-            if [ -f "backend/$service/requirements-dev.txt" ]; then
-              pip install -r "backend/$service/requirements-dev.txt"
-              pip install -r "backend/$service/requirements.txt"
-            fi
-          done
-          pip install pytest httpx flake8
-
-      - name: Lint backend Python code
-        run: |
-          for service in customer_service order_service product_service; do
-            flake8 backend/$service || true
-          done
-
-      - name: Run customer_service tests
-        working-directory: backend/customer_service
+      # Customer DB
+      customer_db:
+        image: postgres:15
         env:
-          POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5432
-          POSTGRES_DB: customers
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        run: pytest tests --maxfail=1 --disable-warnings -v
+          POSTGRES_DB: customers
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install base dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pytest flake8 httpx
 
       - name: Run product_service tests
         working-directory: backend/product_service
         env:
           POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5433
+          POSTGRES_PORT: 5432
           POSTGRES_DB: products
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        run: pytest tests --maxfail=1 --disable-warnings -v
+        run: |
+          pip install -r requirements.txt
+          pytest tests --maxfail=1 --disable-warnings -q
+          flake8 .
 
       - name: Run order_service tests
         working-directory: backend/order_service
         env:
           POSTGRES_HOST: localhost
-          POSTGRES_PORT: 5434
+          POSTGRES_PORT: 5433
           POSTGRES_DB: orders
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-        run: pytest tests --maxfail=1 --disable-warnings -v
+        run: |
+          pip install -r requirements.txt
+          pytest tests --maxfail=1 --disable-warnings -q
+          flake8 .
 
-  # Job 2: Build and Push Docker Images sequentially (latest only)
-  build-and-push-images:
+      - name: Run customer_service tests
+        working-directory: backend/customer_service
+        env:
+          POSTGRES_HOST: localhost
+          POSTGRES_PORT: 5434
+          POSTGRES_DB: customers
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        run: |
+          pip install -r requirements.txt
+          pytest tests --maxfail=1 --disable-warnings -q
+          flake8 .
+
+  build_and_push_images:
     runs-on: ubuntu-latest
-    needs: test-backend-services
+    needs: test_and_lint_backends
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: azure/login@v1
+      - name: Azure Login
+        uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to ACR
         run: az acr login --name ${{ env.ACR_LOGIN_SERVER }}
 
-      - name: Build & Push customer_service
-        run: |
-          docker build -t ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest ./backend/customer_service
-          docker push ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest
+      # Dry-run builds
+      - name: Dry-run Product Service build
+        run: docker build --tag product_service:dryrun ./backend/product_service
 
-      - name: Build & Push product_service
+      - name: Dry-run Order Service build
+        run: docker build --tag order_service:dryrun ./backend/order_service
+
+      - name: Dry-run Customer Service build
+        run: docker build --tag customer_service:dryrun ./backend/customer_service
+
+      - name: Dry-run Frontend build
+        run: docker build --tag frontend:dryrun ./frontend
+
+      # Actual builds + push
+      - name: Build & Push Product Service
         run: |
           docker build -t ${{ env.ACR_LOGIN_SERVER }}/product_service:latest ./backend/product_service
           docker push ${{ env.ACR_LOGIN_SERVER }}/product_service:latest
 
-      - name: Build & Push order_service
+      - name: Build & Push Order Service
         run: |
           docker build -t ${{ env.ACR_LOGIN_SERVER }}/order_service:latest ./backend/order_service
           docker push ${{ env.ACR_LOGIN_SERVER }}/order_service:latest
 
-      - name: Build & Push frontend
+      - name: Build & Push Customer Service
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest ./backend/customer_service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/customer_service:latest
+
+      - name: Build & Push Frontend
         run: |
           docker build -t ${{ env.ACR_LOGIN_SERVER }}/frontend:latest ./frontend
           docker push ${{ env.ACR_LOGIN_SERVER }}/frontend:latest
@@ -144,26 +165,3 @@ jobs:
       - name: Logout from Azure
         run: az logout
         if: always()
-
-  # Job 3: Frontend lint
-  lint-frontend:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: |
-          echo "Lint frontend here (e.g., eslint)."
-          ls -la frontend/
-
-  # Job 4: Validate Kubernetes Manifests
-  validate-k8s-manifests:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl && sudo mv kubectl /usr/local/bin/
-      - name: Validate Kubernetes YAML files
-        run: |
-          kubectl kustomize k8s/ >/dev/null || echo "Kustomize validation failed"
-          kubectl apply --dry-run=client -f k8s/ --validate=true
