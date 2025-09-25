@@ -54,39 +54,51 @@ jobs:
         run: |
           echo "Running automated smoke tests on staging environment..."
 
-          # Get ClusterIP of services in the staging namespace
-          PRODUCT_IP=$(kubectl get svc product-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
-          ORDER_IP=$(kubectl get svc order-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
-          CUSTOMER_IP=$(kubectl get svc customer-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
-          FRONTEND_IP=$(kubectl get svc frontend -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
+          # Wait for pods to be ready
+          echo "Waiting for all pods to be in Running state..."
+          kubectl wait --for=condition=ready pod -l app -n $STAGING_NAMESPACE --timeout=300s
+          echo "✅ All pods are running"
 
-          echo "Product service IP: $PRODUCT_IP"
-          echo "Order service IP: $ORDER_IP"
-          echo "Customer service IP: $CUSTOMER_IP"
-          echo "Frontend IP: $FRONTEND_IP"
+          # Get external IPs for LoadBalancer services
+          FRONTEND_IP=$(kubectl get svc frontend -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          PRODUCT_IP=$(kubectl get svc product-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          ORDER_IP=$(kubectl get svc order-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+          CUSTOMER_IP=$(kubectl get svc customer-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+
+          # Ensure all external IPs are assigned
+          for name in FRONTEND_IP PRODUCT_IP ORDER_IP CUSTOMER_IP; do
+            IP=${!name}
+            if [ -z "$IP" ]; then
+              echo "❌ $name not assigned yet"
+              exit 1
+            fi
+          done
+          echo "✅ All LoadBalancer services have external IPs"
+
+          # Test each service via external IP
+          echo "Testing frontend..."
+          curl -fs http://$FRONTEND_IP:80/ || { echo "❌ Frontend test failed"; exit 1; }
 
           echo "Testing product-service..."
-          curl -fs http://$PRODUCT_IP:8000/health || { echo "❌ Product-service failed"; exit 1; }
+          curl -fs http://$PRODUCT_IP:8000/health || { echo "❌ Product-service test failed"; exit 1; }
 
           echo "Testing order-service..."
-          curl -fs http://$ORDER_IP:8001/health || { echo "❌ Order-service failed"; exit 1; }
+          curl -fs http://$ORDER_IP:8001/health || { echo "❌ Order-service test failed"; exit 1; }
 
           echo "Testing customer-service..."
-          curl -fs http://$CUSTOMER_IP:8002/health || { echo "❌ Customer-service failed"; exit 1; }
-
-          echo "Testing frontend..."
-          curl -fs http://$FRONTEND_IP:80/ || { echo "❌ Frontend failed"; exit 1; }
+          curl -fs http://$CUSTOMER_IP:8002/health || { echo "❌ Customer-service test failed"; exit 1; }
 
           echo "Testing product API..."
-          curl -fs http://$PRODUCT_IP:8000/products/ || { echo "❌ Product API failed"; exit 1; }
+          curl -fs http://$PRODUCT_IP:8000/products/ || { echo "❌ Product API test failed"; exit 1; }
 
           echo "Testing order API..."
-          curl -fs http://$ORDER_IP:8001/orders/ || { echo "❌ Order API failed"; exit 1; }
+          curl -fs http://$ORDER_IP:8001/orders/ || { echo "❌ Order API test failed"; exit 1; }
 
           echo "Testing customer API..."
-          curl -fs http://$CUSTOMER_IP:8002/customers/ || { echo "❌ Customer API failed"; exit 1; }
+          curl -fs http://$CUSTOMER_IP:8002/customers/ || { echo "❌ Customer API test failed"; exit 1; }
 
           echo "✅ All smoke tests passed!"
+
 
 
 
