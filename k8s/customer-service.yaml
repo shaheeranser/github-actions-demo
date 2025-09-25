@@ -1,0 +1,58 @@
+# week10/k8s/customer-service.yaml
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: customer-service
+  labels:
+    app: customer-service
+spec:
+  replicas: 1 # Defaulting to 1 replica
+  selector:
+    matchLabels:
+      app: customer-service
+  template:
+    metadata:
+      labels:
+        app: customer-service
+    spec:
+      containers:
+      - name: customer-service-container
+        image:  week10acrdevops.azurecr.io/customer_service:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        # Database connection details
+        - name: POSTGRES_HOST
+          value: customer-db-service
+        - name: POSTGRES_DB
+          valueFrom:
+            configMapKeyRef:
+              name: config-map
+              key: CUSTOMERS_DB_NAME
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: secrets
+              key: POSTGRES_USER
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: secrets
+              key: POSTGRES_PASSWORD
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: customer-service
+  labels:
+    app: customer-service
+spec:
+  selector:
+    app: customer-service
+  ports:
+    - protocol: TCP
+      port: 8002
+      targetPort: 8000
+  type: LoadBalancer

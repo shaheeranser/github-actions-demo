@@ -1,0 +1,133 @@
+name: Staging Deployment - Temporary Environment
+
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:  # Allow manual triggers
+
+env:
+  STAGING_NAMESPACE: staging-${{ github.run_id }}
+  ACR_LOGIN_SERVER: ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+jobs:
+  deploy-and-test-staging:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Set Kubernetes context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Create temporary staging namespace
+        run: |
+          echo "Creating temporary staging namespace: ${{ env.STAGING_NAMESPACE }}"
+          kubectl create namespace ${{ env.STAGING_NAMESPACE }}
+          echo "✅ Staging namespace created successfully"
+
+      - name: Deploy entire application to staging
+        run: |
+          echo "Deploying complete application stack to staging..."
+          kubectl apply -f k8s/ -n ${{ env.STAGING_NAMESPACE }}
+          echo "✅ Application deployed to staging"
+
+      - name: Wait for all pods to be running
+        run: |
+          echo "Waiting for all pods to be in Running state..."
+          kubectl wait --for=condition=Ready pods --all -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          echo "✅ All pods are running"
+
+      - name: Run automated smoke tests
+        run: |
+          echo "Running automated smoke tests on staging environment..."
+
+          # Function to wait for LoadBalancer IP
+          wait_for_ip() {
+            local svc_name=$1
+            local ip=""
+            local timeout=120
+            local interval=5
+            local elapsed=0
+
+            while [ -z "$ip" ] && [ $elapsed -lt $timeout ]; do
+              ip=$(kubectl get svc $svc_name -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+              if [ -z "$ip" ]; then
+                echo "❌ $svc_name IP not assigned yet, waiting..."
+                sleep $interval
+                elapsed=$((elapsed + interval))
+              fi
+            done
+
+            if [ -z "$ip" ]; then
+              echo "❌ $svc_name never got an external IP, aborting tests."
+              exit 1
+            fi
+
+            echo "✅ $svc_name IP assigned: $ip"
+            echo $ip
+          }
+
+          # Wait for LoadBalancer IPs
+          FRONTEND_IP=$(wait_for_ip frontend)
+          PRODUCT_IP=$(wait_for_ip product-service)
+          ORDER_IP=$(wait_for_ip order-service)
+          CUSTOMER_IP=$(wait_for_ip customer-service)
+
+          # Perform curl checks
+          echo "Testing frontend..."
+          curl -fs http://$FRONTEND_IP:80/ || exit 1
+
+          echo "Testing product-service..."
+          curl -fs http://$PRODUCT_IP:8000/health || exit 1
+
+          echo "Testing order-service..."
+          curl -fs http://$ORDER_IP:8001/health || exit 1
+
+          echo "Testing customer-service..."
+          curl -fs http://$CUSTOMER_IP:8002/health || exit 1
+
+          echo "Testing product API..."
+          curl -fs http://$PRODUCT_IP:8000/products/ || exit 1
+
+          echo "Testing order API..."
+          curl -fs http://$ORDER_IP:8001/orders/ || exit 1
+
+          echo "Testing customer API..."
+          curl -fs http://$CUSTOMER_IP:8002/customers/ || exit 1
+
+          echo "✅ All smoke tests passed!"
+
+      - name: Collect pod logs on failure
+        if: failure()
+        run: |
+          echo "Collecting logs for debugging..."
+          kubectl logs -n ${{ env.STAGING_NAMESPACE }} --all-containers --selector=app > staging-logs.txt || true
+        continue-on-error: true
+
+      - name: Upload logs as artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: staging-logs
+          path: staging-logs.txt
+
+      - name: Destroy temporary staging environment
+        if: always()
+        run: |
+          echo "Destroying temporary staging namespace: ${{ env.STAGING_NAMESPACE }}"
+          kubectl delete namespace ${{ env.STAGING_NAMESPACE }} --ignore-not-found=true
+          echo "✅ Staging environment destroyed successfully"
+
+      - name: Logout from Azure
+        if: always()
+        run: az logout

@@ -1,0 +1,116 @@
+name: CD - Deploy to AKS
+
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      aks_cluster_name:
+        required: true
+        type: string
+      aks_resource_group:
+        required: true
+        type: string
+
+jobs:
+  deploy-backend:
+    runs-on: ubuntu-latest
+
+    outputs:
+      customer_service_ip: ${{ steps.get_ips.outputs.customer_ip }}
+      product_service_ip: ${{ steps.get_ips.outputs.product_ip }}
+      order_service_ip: ${{ steps.get_ips.outputs.order_ip }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      # Build & Push backend images separately
+      - name: Build and Push Customer Service
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer:latest ./customer/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer:latest
+
+      - name: Build and Push Product Service
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product:latest ./product/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product:latest
+
+      - name: Build and Push Order Service
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order:latest ./order/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order:latest
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ inputs.aks_resource_group }}
+          cluster-name: ${{ inputs.aks_cluster_name }}
+
+      - name: Deploy backend services
+        run: |
+          cd k8s/
+          kubectl apply -f customer.yaml
+          kubectl apply -f product.yaml
+          kubectl apply -f order.yaml
+
+      - name: Get backend service IPs
+        id: get_ips
+        run: |
+          echo "Waiting for LoadBalancer IPs..."
+          sleep 60
+          echo "customer_ip=$(kubectl get svc customer-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
+          echo "product_ip=$(kubectl get svc product-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
+          echo "order_ip=$(kubectl get svc order-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    needs: deploy-backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v1
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to Azure Container Registry
+        run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Inject Backend IPs into Frontend main.js
+        run: |
+          sed -i "s|_CUSTOMER_API_URL_|http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002|g" frontend/main.js
+          sed -i "s|_PRODUCT_API_URL_|http://${{ needs.deploy-backend.outputs.product_service_ip }}:8000|g" frontend/main.js
+          sed -i "s|_ORDER_API_URL_|http://${{ needs.deploy-backend.outputs.order_service_ip }}:8001|g" frontend/main.js
+          echo "--- Modified main.js ---"
+          grep -E "http://" frontend/main.js || echo "No URLs found"
+
+      - name: Build and Push Frontend
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest ./frontend/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/frontend:latest
+
+      - name: Set AKS context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ inputs.aks_resource_group }}
+          cluster-name: ${{ inputs.aks_cluster_name }}
+
+      - name: Dry-run Kubernetes manifests
+        run: |
+          cd k8s/
+          kubectl apply --dry-run=client -o yaml -f frontend.yaml
+
+      - name: Deploy frontend
+        run: |
+          cd k8s/
+          kubectl apply -f frontend.yaml
