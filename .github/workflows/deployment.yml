@@ -32,27 +32,24 @@ jobs:
       - name: Login to Azure Container Registry
         run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
-      - name: Build and Push Product Service
-        run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product-service:latest ./product-service/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product-service:latest
-
-      - name: Build and Push Order Service
-        run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order-service:latest ./order-service/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order-service:latest
-
-      # Build & Push backend images separately
-      - name: Build and Push Customer Service
-        run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer-service:latest ./customer-service/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer-service:latest
-
       - name: Set AKS context
         uses: azure/aks-set-context@v3
         with:
-          resource-group: ${{ inputs.aks_resource_group }}
-          cluster-name: ${{ inputs.aks_cluster_name }}
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+      - name: Attach ACR
+        run: |
+          az aks update --name ${{ secrets.AKS_CLUSTER_NAME }} --resource-group ${{ secrets.AKS_RESOURCE_GROUP }} --attach-acr ${{ secrets.AZURE_CONTAINER_REGISTRY }}
+
+      - name: Deploy Backend Infrastructure (Namespace, ConfigMaps, Secrets, Databases)
+        run: |
+          echo "Deploying backend infrastructure..."
+          cd k8s/
+          kubectl apply -f configmaps.yaml
+          kubectl apply -f secrets.yaml
+          kubectl apply -f product-db.yaml
+          kubectl apply -f order-db.yaml
+          kubectl apply -f customer-db.yaml
 
       - name: Deploy backend services
         run: |
