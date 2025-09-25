@@ -71,7 +71,13 @@ jobs:
       - name: Install base dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest flake8 httpx
+          # Loop through each backend service folder
+          for req in backend/*/requirements-dev.txt; do
+            echo "Installing $req"
+            pip install -r "$req"
+          done
+          # Install CI tools
+          pip install pytest httpx
 
       - name: Run product_service tests
         working-directory: backend/product_service
@@ -82,7 +88,6 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         run: |
-          pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
 
       - name: Run order_service tests
@@ -93,8 +98,8 @@ jobs:
           POSTGRES_DB: orders
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
+          PRODUCT_SERVICE_URL: http://placeholder-product-service
         run: |
-          pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
 
       - name: Run customer_service tests
@@ -106,7 +111,6 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
         run: |
-          pip install -r requirements-dev.txt
           pytest tests --maxfail=1 --disable-warnings -q
 
   build_and_push_images:
