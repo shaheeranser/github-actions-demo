@@ -50,29 +50,45 @@ jobs:
       - name: Run automated smoke tests
         run: |
           echo "Running automated smoke tests on staging environment..."
-          
-          # Instead of port-forward, test directly inside cluster using kubectl exec
-          FRONTEND_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-          CUSTOMER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=customer-service -o jsonpath='{.items[0].metadata.name}')
-          PRODUCT_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=product-service -o jsonpath='{.items[0].metadata.name}')
-          ORDER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=order-service -o jsonpath='{.items[0].metadata.name}')
+
+          # Start port-forwards in background
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} svc/frontend 8080:80 &
+          FRONTEND_PID=$!
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} svc/product-service 8000:8000 &
+          PRODUCT_PID=$!
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} svc/order-service 8001:8001 &
+          ORDER_PID=$!
+          kubectl port-forward -n ${{ env.STAGING_NAMESPACE }} svc/customer-service 8002:8002 &
+          CUSTOMER_PID=$!
+
+          # Give port-forwards time to start
+          sleep 10
 
           echo "Testing frontend..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $FRONTEND_POD -- curl -fs http://localhost:80/ || exit 1
-
-          echo "Testing customer-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $CUSTOMER_POD -- curl -fs http://localhost:8002/health || exit 1
+          curl -fs http://localhost:8080/ || exit 1
 
           echo "Testing product-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -fs http://localhost:8000/health || exit 1
+          curl -fs http://localhost:8000/health || exit 1
 
           echo "Testing order-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $ORDER_POD -- curl -fs http://localhost:8001/health || exit 1
+          curl -fs http://localhost:8001/health || exit 1
+
+          echo "Testing customer-service..."
+          curl -fs http://localhost:8002/health || exit 1
 
           echo "Testing product API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -fs http://localhost:8000/products/ || exit 1
+          curl -fs http://localhost:8000/products/ || exit 1
+
+          echo "Testing order API..."
+          curl -fs http://localhost:8001/orders/ || exit 1
+
+          echo "Testing customer API..."
+          curl -fs http://localhost:8002/customers/ || exit 1
 
           echo "✅ All smoke tests passed!"
+
+          # Cleanup port-forwards
+          kill $FRONTEND_PID $PRODUCT_PID $ORDER_PID $CUSTOMER_PID
 
       - name: Collect pod logs on failure
         if: failure()
