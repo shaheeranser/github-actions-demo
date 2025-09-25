@@ -32,21 +32,21 @@ jobs:
       - name: Login to Azure Container Registry
         run: az acr login --name ${{ secrets.AZURE_CONTAINER_REGISTRY }}
 
-      # Build & Push backend images separately
-      - name: Build and Push Customer Service
-        run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer:latest ./customer/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer:latest
-
       - name: Build and Push Product Service
         run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product:latest ./product/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product:latest
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product-service:latest ./product-service/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/product-service:latest
 
       - name: Build and Push Order Service
         run: |
-          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order:latest ./order/
-          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order:latest
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order-service:latest ./order-service/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/order-service:latest
+
+      # Build & Push backend images separately
+      - name: Build and Push Customer Service
+        run: |
+          docker build -t ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer-service:latest ./customer-service/
+          docker push ${{ secrets.AZURE_CONTAINER_REGISTRY }}/customer-service:latest
 
       - name: Set AKS context
         uses: azure/aks-set-context@v3
@@ -57,18 +57,18 @@ jobs:
       - name: Deploy backend services
         run: |
           cd k8s/
-          kubectl apply -f customer.yaml
-          kubectl apply -f product.yaml
-          kubectl apply -f order.yaml
+          kubectl apply -f product-service.yaml
+          kubectl apply -f order-service.yaml
+          kubectl apply -f customer-service.yaml
 
       - name: Get backend service IPs
         id: get_ips
         run: |
           echo "Waiting for LoadBalancer IPs..."
           sleep 60
-          echo "customer_ip=$(kubectl get svc customer-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
           echo "product_ip=$(kubectl get svc product-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
           echo "order_ip=$(kubectl get svc order-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
+          echo "customer_ip=$(kubectl get svc customer-service -o jsonpath='{.status.loadBalancer.ingress[0].ip}')" >> $GITHUB_OUTPUT
 
   deploy-frontend:
     runs-on: ubuntu-latest
@@ -88,9 +88,9 @@ jobs:
 
       - name: Inject Backend IPs into Frontend main.js
         run: |
-          sed -i "s|_CUSTOMER_API_URL_|http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002|g" frontend/main.js
           sed -i "s|_PRODUCT_API_URL_|http://${{ needs.deploy-backend.outputs.product_service_ip }}:8000|g" frontend/main.js
           sed -i "s|_ORDER_API_URL_|http://${{ needs.deploy-backend.outputs.order_service_ip }}:8001|g" frontend/main.js
+          sed -i "s|_CUSTOMER_API_URL_|http://${{ needs.deploy-backend.outputs.customer_service_ip }}:8002|g" frontend/main.js
           echo "--- Modified main.js ---"
           grep -E "http://" frontend/main.js || echo "No URLs found"
 
