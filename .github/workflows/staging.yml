@@ -41,66 +41,71 @@ jobs:
           kubectl apply -f k8s/ -n ${{ env.STAGING_NAMESPACE }}
           echo "✅ Application deployed to staging"
 
-      - name: Wait for deployments rollout
+      - name: Wait for all pods to be running
         run: |
-          echo "Waiting for all deployments to finish rollout..."
-          kubectl rollout status deployment/frontend -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl rollout status deployment/product-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl rollout status deployment/order-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          kubectl rollout status deployment/customer-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          echo "✅ All deployments rolled out successfully!"
+          echo "Waiting for all pods to be in Running state..."
+          kubectl wait --for=condition=Ready pods --all -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          echo "✅ All pods are running"
 
       - name: Run automated smoke tests
         run: |
           echo "Running automated smoke tests on staging environment..."
 
-          # Wait for pods to be ready
-          echo "Waiting for all pods to be in Running state..."
-          kubectl wait --for=condition=ready pod -l app -n $STAGING_NAMESPACE --timeout=300s
-          echo "✅ All pods are running"
+          # Function to wait for LoadBalancer IP
+          wait_for_ip() {
+            local svc_name=$1
+            local ip=""
+            local timeout=120
+            local interval=5
+            local elapsed=0
 
-          # Get external IPs for LoadBalancer services
-          FRONTEND_IP=$(kubectl get svc frontend -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          PRODUCT_IP=$(kubectl get svc product-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          ORDER_IP=$(kubectl get svc order-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-          CUSTOMER_IP=$(kubectl get svc customer-service -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+            while [ -z "$ip" ] && [ $elapsed -lt $timeout ]; do
+              ip=$(kubectl get svc $svc_name -n $STAGING_NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+              if [ -z "$ip" ]; then
+                echo "❌ $svc_name IP not assigned yet, waiting..."
+                sleep $interval
+                elapsed=$((elapsed + interval))
+              fi
+            done
 
-          # Ensure all external IPs are assigned
-          for name in FRONTEND_IP PRODUCT_IP ORDER_IP CUSTOMER_IP; do
-            IP=${!name}
-            if [ -z "$IP" ]; then
-              echo "❌ $name not assigned yet"
+            if [ -z "$ip" ]; then
+              echo "❌ $svc_name never got an external IP, aborting tests."
               exit 1
             fi
-          done
-          echo "✅ All LoadBalancer services have external IPs"
 
-          # Test each service via external IP
+            echo "✅ $svc_name IP assigned: $ip"
+            echo $ip
+          }
+
+          # Wait for LoadBalancer IPs
+          FRONTEND_IP=$(wait_for_ip frontend)
+          PRODUCT_IP=$(wait_for_ip product-service)
+          ORDER_IP=$(wait_for_ip order-service)
+          CUSTOMER_IP=$(wait_for_ip customer-service)
+
+          # Perform curl checks
           echo "Testing frontend..."
-          curl -fs http://$FRONTEND_IP:80/ || { echo "❌ Frontend test failed"; exit 1; }
+          curl -fs http://$FRONTEND_IP:80/ || exit 1
 
           echo "Testing product-service..."
-          curl -fs http://$PRODUCT_IP:8000/health || { echo "❌ Product-service test failed"; exit 1; }
+          curl -fs http://$PRODUCT_IP:8000/health || exit 1
 
           echo "Testing order-service..."
-          curl -fs http://$ORDER_IP:8001/health || { echo "❌ Order-service test failed"; exit 1; }
+          curl -fs http://$ORDER_IP:8001/health || exit 1
 
           echo "Testing customer-service..."
-          curl -fs http://$CUSTOMER_IP:8002/health || { echo "❌ Customer-service test failed"; exit 1; }
+          curl -fs http://$CUSTOMER_IP:8002/health || exit 1
 
           echo "Testing product API..."
-          curl -fs http://$PRODUCT_IP:8000/products/ || { echo "❌ Product API test failed"; exit 1; }
+          curl -fs http://$PRODUCT_IP:8000/products/ || exit 1
 
           echo "Testing order API..."
-          curl -fs http://$ORDER_IP:8001/orders/ || { echo "❌ Order API test failed"; exit 1; }
+          curl -fs http://$ORDER_IP:8001/orders/ || exit 1
 
           echo "Testing customer API..."
-          curl -fs http://$CUSTOMER_IP:8002/customers/ || { echo "❌ Customer API test failed"; exit 1; }
+          curl -fs http://$CUSTOMER_IP:8002/customers/ || exit 1
 
           echo "✅ All smoke tests passed!"
-
-
-
 
       - name: Collect pod logs on failure
         if: failure()
