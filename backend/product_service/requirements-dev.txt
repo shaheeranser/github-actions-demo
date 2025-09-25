@@ -7,5 +7,4 @@ pydantic
 azure-storage-blob
 aio-pika
 pytest
-flake8
 httpx
