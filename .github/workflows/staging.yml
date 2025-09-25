@@ -49,36 +49,27 @@ jobs:
 
       - name: Run automated smoke tests
         run: |
-          set -euo pipefail
-          echo "Running automated smoke tests on staging environment..."
-          
-          FRONTEND_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=frontend -o jsonpath='{.items[0].metadata.name}')
-          PRODUCT_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=product-service -o jsonpath='{.items[0].metadata.name}')
-          ORDER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=order-service -o jsonpath='{.items[0].metadata.name}')
-          CUSTOMER_POD=$(kubectl get pod -n ${{ env.STAGING_NAMESPACE }} -l app=customer-service -o jsonpath='{.items[0].metadata.name}')
-
-          echo "Testing frontend..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $FRONTEND_POD -- curl -v http://localhost:80/ || { echo "❌ Frontend failed"; exit 1; }
-
-          echo "Testing product-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -v http://localhost:8000/health || { echo "❌ Product-service failed"; exit 1; }
-
-          echo "Testing order-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $ORDER_POD -- curl -v http://localhost:8001/health || { echo "❌ Order-service failed"; exit 1; }
-
-          echo "Testing customer-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $CUSTOMER_POD -- curl -v http://localhost:8002/health || { echo "❌ Customer-service failed"; exit 1; }
-
-          echo "Testing product API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $PRODUCT_POD -- curl -v http://localhost:8000/products/ || { echo "❌ Product API failed"; exit 1; }
-
-          echo "Testing order API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $ORDER_POD -- curl -v http://localhost:8001/orders/ || { echo "❌ Order API failed"; exit 1; }
-
-          echo "Testing customer API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $CUSTOMER_POD -- curl -v http://localhost:8002/customers/ || { echo "❌ Customer API failed"; exit 1; }
-
-          echo "✅ All smoke tests passed!"
+          echo "🚀 Running smoke tests using temporary curl pod..."
+          kubectl run curl --rm -i --tty \
+            --image=curlimages/curl:8.5.0 \
+            -n ${{ env.STAGING_NAMESPACE }} -- \
+            sh -c "
+              echo 'Testing frontend...' &&
+              curl -fs http://frontend:80/ || exit 1 &&
+              echo 'Testing product-service...' &&
+              curl -fs http://product-service:8000/health || exit 1 &&
+              echo 'Testing order-service...' &&
+              curl -fs http://order-service:8001/health || exit 1 &&
+              echo 'Testing customer-service...' &&
+              curl -fs http://customer-service:8002/health || exit 1 &&
+              echo 'Testing product API...' &&
+              curl -fs http://product-service:8000/products/ || exit 1 &&
+              echo 'Testing order API...' &&
+              curl -fs http://order-service:8001/orders/ || exit 1 &&
+              echo 'Testing customer API...' &&
+              curl -fs http://customer-service:8002/customers/ || exit 1 &&
+              echo '✅ All smoke tests passed!'
+            "
 
       - name: Collect pod logs on failure
         if: failure()
