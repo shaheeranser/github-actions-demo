@@ -41,35 +41,53 @@ jobs:
           kubectl apply -f k8s/ -n ${{ env.STAGING_NAMESPACE }}
           echo "✅ Application deployed to staging"
 
-      - name: Wait for all pods to be ready
+      - name: Wait for deployments rollout
         run: |
-          echo "Waiting for all pods in namespace ${{ env.STAGING_NAMESPACE }}..."
-          kubectl wait --for=condition=ready pod -l app -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
-          echo "✅ All pods are ready!"
+          echo "Waiting for all deployments to finish rollout..."
+          kubectl rollout status deployment/frontend -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl rollout status deployment/product-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl rollout status deployment/order-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          kubectl rollout status deployment/customer-service -n ${{ env.STAGING_NAMESPACE }} --timeout=300s
+          echo "✅ All deployments rolled out successfully!"
 
       - name: Run automated smoke tests
         run: |
-          echo "🚀 Running smoke tests using temporary curl pod..."
-          kubectl run curl --rm -i --tty \
+          echo "Running automated smoke tests on staging environment..."
+
+          TEST_POD=$(kubectl run smoke-tests \
             --image=curlimages/curl:8.5.0 \
-            -n ${{ env.STAGING_NAMESPACE }} -- \
-            sh -c "
-              echo 'Testing frontend...' &&
-              curl -fs http://frontend:80/ || exit 1 &&
-              echo 'Testing product-service...' &&
-              curl -fs http://product-service:8000/health || exit 1 &&
-              echo 'Testing order-service...' &&
-              curl -fs http://order-service:8001/health || exit 1 &&
-              echo 'Testing customer-service...' &&
-              curl -fs http://customer-service:8002/health || exit 1 &&
-              echo 'Testing product API...' &&
-              curl -fs http://product-service:8000/products/ || exit 1 &&
-              echo 'Testing order API...' &&
-              curl -fs http://order-service:8001/orders/ || exit 1 &&
-              echo 'Testing customer API...' &&
-              curl -fs http://customer-service:8002/customers/ || exit 1 &&
-              echo '✅ All smoke tests passed!'
-            "
+            --restart=Never \
+            --namespace=${{ env.STAGING_NAMESPACE }} \
+            --command -- sleep 300)
+
+          # Wait until the test pod is ready
+          kubectl wait --for=condition=Ready pod/$TEST_POD -n ${{ env.STAGING_NAMESPACE }} --timeout=60s
+
+          echo "Testing frontend..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://frontend:80/ || exit 1
+
+          echo "Testing product-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://product-service:8000/health || exit 1
+
+          echo "Testing order-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://order-service:8001/health || exit 1
+
+          echo "Testing customer-service..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://customer-service:8002/health || exit 1
+
+          echo "Testing product API..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://product-service:8000/products/ || exit 1
+
+          echo "Testing order API..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://order-service:8001/orders/ || exit 1
+
+          echo "Testing customer API..."
+          kubectl exec -n ${{ env.STAGING_NAMESPACE }} $TEST_POD -- curl -fs http://customer-service:8002/customers/ || exit 1
+
+          echo "✅ All smoke tests passed!"
+
+          # Cleanup smoke test pod
+          kubectl delete pod $TEST_POD -n ${{ env.STAGING_NAMESPACE }} --ignore-not-found
 
       - name: Collect pod logs on failure
         if: failure()
