@@ -54,42 +54,40 @@ jobs:
         run: |
           echo "Running automated smoke tests on staging environment..."
 
-          # Create the test pod
-          kubectl run smoke-tests \
-            --image=curlimages/curl:8.5.0 \
-            --restart=Never \
-            --namespace=${{ env.STAGING_NAMESPACE }} \
-            --command -- sleep 300
+          # Get ClusterIP of services in the staging namespace
+          PRODUCT_IP=$(kubectl get svc product-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
+          ORDER_IP=$(kubectl get svc order-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
+          CUSTOMER_IP=$(kubectl get svc customer-service -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
+          FRONTEND_IP=$(kubectl get svc frontend -n $STAGING_NAMESPACE -o jsonpath='{.spec.clusterIP}')
 
-          # Wait until the test pod is ready
-          kubectl wait --for=condition=Ready pod/smoke-tests \
-            -n ${{ env.STAGING_NAMESPACE }} --timeout=60s
-
-          echo "Testing frontend..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://frontend:80/ || exit 1
+          echo "Product service IP: $PRODUCT_IP"
+          echo "Order service IP: $ORDER_IP"
+          echo "Customer service IP: $CUSTOMER_IP"
+          echo "Frontend IP: $FRONTEND_IP"
 
           echo "Testing product-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://product-service:8000/health || exit 1
+          curl -fs http://$PRODUCT_IP:8000/health || { echo "❌ Product-service failed"; exit 1; }
 
           echo "Testing order-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://order-service:8001/health || exit 1
+          curl -fs http://$ORDER_IP:8001/health || { echo "❌ Order-service failed"; exit 1; }
 
           echo "Testing customer-service..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://customer-service:8002/health || exit 1
+          curl -fs http://$CUSTOMER_IP:8002/health || { echo "❌ Customer-service failed"; exit 1; }
+
+          echo "Testing frontend..."
+          curl -fs http://$FRONTEND_IP:80/ || { echo "❌ Frontend failed"; exit 1; }
 
           echo "Testing product API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://product-service:8000/products/ || exit 1
+          curl -fs http://$PRODUCT_IP:8000/products/ || { echo "❌ Product API failed"; exit 1; }
 
           echo "Testing order API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://order-service:8001/orders/ || exit 1
+          curl -fs http://$ORDER_IP:8001/orders/ || { echo "❌ Order API failed"; exit 1; }
 
           echo "Testing customer API..."
-          kubectl exec -n ${{ env.STAGING_NAMESPACE }} smoke-tests -- curl -fs http://customer-service:8002/customers/ || exit 1
+          curl -fs http://$CUSTOMER_IP:8002/customers/ || { echo "❌ Customer API failed"; exit 1; }
 
           echo "✅ All smoke tests passed!"
 
-          # Cleanup smoke test pod
-          kubectl delete pod smoke-tests -n ${{ env.STAGING_NAMESPACE }} --ignore-not-found
 
 
       - name: Collect pod logs on failure
