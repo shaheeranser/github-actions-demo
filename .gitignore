@@ -1,0 +1,17 @@
+# Secrets / local env
+k8s/secrets.yaml
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# OS
+.DS_Store
+
+# Node
+node_modules/
